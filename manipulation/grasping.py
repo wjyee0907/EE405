@@ -165,7 +165,7 @@ class GraspingNode(GraspingNodeBase):
         T_world_marker: np.ndarray,
         grasp_depth: float = 0.025,
         approach_height: float = 0.02,
-        tolerance: float = 0.03
+        tolerance: float = 0.007
     ) -> tuple[np.ndarray, np.ndarray] | None:
         """Return (T_approach, T_grasp), or None if no sampled pair passes IK.
 
@@ -184,7 +184,7 @@ class GraspingNode(GraspingNodeBase):
         
         print("before for loop")
 
-        for yaw_deg in (0, 10, 20, 70, 80, 90, 100, 110, 160, 170, 180, 190, 200, 250, 260, 270, 280, 290, 340, 350):
+        for yaw_deg in (0, 10, 80, 90, 100, 170, 180, 190, 260, 270, 280, 350):
 
             yaw_deg = np.deg2rad(yaw_deg)
 
@@ -197,7 +197,7 @@ class GraspingNode(GraspingNodeBase):
             T_marker_tcp[:3, 3] = [0.0, 0.0, 0.0]
             
             T_tcp_realtcp = np.eye(4)
-            T_tcp_realtcp[:3, 3] = [-0.01, 0.0, +grasp_depth]
+            T_tcp_realtcp[:3, 3] = [-0.005, 0.0, +grasp_depth]
             
             T_marker_tcp = np.matmul(T_marker_tcp, T_tcp_realtcp)
 

@@ -77,7 +77,7 @@ def err_fn(q,tar):
     P_tar = tar[0:3,3]
     rot_err = SO3.from_matrix(R_ee.T @ R_tar).log()
     pos_err = P_ee-P_tar
-    return jnp.concatenate([rot_err, pos_err])
+    return jnp.concatenate([0.1* rot_err, 0.9984 * pos_err])
 
 jac_jit = jax.jit(jax.jacfwd(err_fn))
 err_jit = jax.jit(err_fn)
@@ -104,14 +104,30 @@ def inverse_kinematics(
     jax.config.update("jax_enable_x64", True)
 
     
+    upper_limit = np.deg2rad([120,120,120,120,45])
+    lower_limit = -upper_limit
+    rng = np.random.default_rng(0)
 
-    res = least_squares(lambda q:np.asarray(err_jit(q,T_target)),
-                        np.asarray(q),
-                        jac = lambda q:np.asarray(jac_jit(q,T_target)))
+    n_trial = 10 #maximum trial number
+    seeds = [np.clip(np.asarray(q, dtype=float), lower_limit, upper_limit)] + [rng.uniform(lower_limit, upper_limit) for _ in range(n_trial)]
 
-    ik_solution = res.x
-    pos_error = float(jnp.linalg.norm(err_fn(ik_solution,T_target)[3:])) + 0.3 * float(jnp.linalg.norm(err_fn(ik_solution,T_target)[:3]))
-    # pos_error = float(np.linalg.norm(res.fun))
+    best = None
+    for seed in seeds:
+        res = least_squares(lambda q:np.asarray(err_jit(q,T_target)),
+                            seed,
+                            jac = lambda q:np.asarray(jac_jit(q,T_target)),
+                            bounds = (lower_limit,upper_limit))
+        q_sol = res.x
+        err = np.asarray(err_fn(q_sol, T_target))
+        pos_err, rot_err = float(np.linalg.norm(err[3:])), float(np.linalg.norm(err[:3]))
+        cost = pos_err + rot_err
+        if best is None or cost < best[0]:
+            best = (cost, q_sol, pos_err)
+
+        if pos_err < 1e-5 and rot_err < 1e-4:
+            break
+
+    _, ik_solution, pos_error = best
 
     #####
 
