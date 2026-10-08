@@ -2,6 +2,7 @@ import time
 import cv2
 import rclpy
 import numpy as np
+import jax.numpy as jnp
 
 from .kinematics import *
 from .utils.kinematics_utils import *
@@ -55,7 +56,10 @@ class GraspingNode(GraspingNodeBase):
         }
        
         # Safe RTB q (Home Pose) (Need Adjustment)
-        self.home_q = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+        self.home_q = pulse2angle([500, 736, 40, 219, 500])
+        
+        self.set_joint_positions(self.home_q, 5.0)
+        time.sleep(5.0)
 
 
         #####
@@ -116,15 +120,25 @@ class GraspingNode(GraspingNodeBase):
 
         rvec = detection_result.rvec
         tvec = detection_result.tvec
+        
+        print(rvec)
 
         R_cam_marker = SO3.exp(rvec).as_matrix()
         
         B_aug = jnp.asarray(tvec).reshape(3, 1)
+        print(B_aug)
         C_aug = jnp.array([[0, 0, 0]])
         D_aug = jnp.array([[1]])
         T_cam_marker = jnp.block([[R_cam_marker, B_aug], [C_aug, D_aug]])
+        print(T_cam_marker)
+        
+        print("help")
+        
+        print(self.get_joint_positions())
 
         T_world_cam = forward_kinematics(self.get_joint_positions(), 'cam')
+        
+        print(T_world_cam)
 
         T_block = jnp.matmul(T_world_cam, T_cam_marker)
 
@@ -136,6 +150,8 @@ class GraspingNode(GraspingNodeBase):
     
     def solve_waypoint(self, T_target, seed, tolerance) -> np.ndarray | None:
         result = inverse_kinematics(seed, T_target)
+        
+        print(result.get("pos_error"))
     
         if result is None or result.get("sol") is None or result.get("pos_error") > tolerance:
             return None
@@ -147,9 +163,9 @@ class GraspingNode(GraspingNodeBase):
     def get_grasp_waypoints(
         self,
         T_world_marker: np.ndarray,
-        grasp_depth: float = 0.01,
-        approach_height: float = 0.05,
-        tolerance: float = 0.005
+        grasp_depth: float = 0.025,
+        approach_height: float = 0.02,
+        tolerance: float = 0.03
     ) -> tuple[np.ndarray, np.ndarray] | None:
         """Return (T_approach, T_grasp), or None if no sampled pair passes IK.
 
@@ -165,32 +181,43 @@ class GraspingNode(GraspingNodeBase):
         T_world_marker = np.asarray(T_world_marker, dtype=float)
 
         q_seed = np.asarray(self.get_joint_positions(), dtype=float)
+        
+        print("before for loop")
 
-        for yaw_deg in (0, 90, 180, 270):
+        for yaw_deg in (0, 10, 20, 70, 80, 90, 100, 110, 160, 170, 180, 190, 200, 250, 260, 270, 280, 290, 340, 350):
 
             yaw_deg = np.deg2rad(yaw_deg)
 
-            R_gripper = np.array([[np.cos(yaw_deg), np.sin(yaw_deg), 0],
-                                [np.sin(yaw_deg), -np.cos(yaw_deg), 0],
+            R_gripper = np.array([[-np.cos(yaw_deg), np.sin(yaw_deg), 0],
+                                [np.sin(yaw_deg), np.cos(yaw_deg), 0],
                                 [0, 0, -1]])
             
             T_marker_tcp = np.eye(4)
             T_marker_tcp[:3, :3] = R_gripper
-            T_marker_tcp[:3, 3] = [0.0, 0.0, -grasp_depth]
+            T_marker_tcp[:3, 3] = [0.0, 0.0, 0.0]
+            
+            T_tcp_realtcp = np.eye(4)
+            T_tcp_realtcp[:3, 3] = [-0.01, 0.0, +grasp_depth]
+            
+            T_marker_tcp = np.matmul(T_marker_tcp, T_tcp_realtcp)
 
             # World T grasp calculation
             T_grasp = T_world_marker @ T_marker_tcp
 
             T_approach = T_grasp.copy()
             # place the approach pose, +approach height z direction.
-            T_approach[2, 3] += (approach_height + grasp_depth)
+            T_approach[2, 3] += approach_height
 
             q_approach = self.solve_waypoint(T_approach, q_seed, tolerance)
+            
+            print(q_approach)
 
             if q_approach is None:
                 continue
 
             q_grasp = self.solve_waypoint(T_grasp, q_approach, tolerance)
+            
+            print(q_approach, q_grasp)
 
             if  q_grasp is not None:
                 return q_approach, q_grasp
@@ -206,9 +233,12 @@ class GraspingNode(GraspingNodeBase):
         ######
         ## TODO : Implement this function to perform the complete grasping sequence.
         is_success = False
+        
+
 
         self.gripper_open()
         time.sleep(self.gripper_duration+self.rest_duration)
+
 
         detected_markers = {} 
         target_marker_id = int(target_marker_id)
@@ -218,20 +248,31 @@ class GraspingNode(GraspingNodeBase):
             if target_marker_id in detected_markers:
                 break
 
+
         if not target_marker_id in detected_markers.keys():
             print(f"marker {target_marker_id} is not detected.\ndetected markers are {list(detected_markers.keys())}")
             return is_success
+            
+
 
         T_block = self.get_block_pose(detected_markers[target_marker_id])
+        
+        print(T_block)
+
 
         q_res_tuple = self.get_grasp_waypoints(T_block)
+
         if q_res_tuple is None:
             return is_success
 
         q_app = q_res_tuple[0]
         q_grasp = q_res_tuple[1]
         
+        print(q_app, q_grasp)
+        
         q_home = self.get_joint_positions()
+        
+        print("calculation good")
 
         self.set_joint_positions(q_app,self.servo_duration) #move to app and...
         time.sleep(self.servo_duration+self.rest_duration)

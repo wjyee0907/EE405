@@ -77,7 +77,7 @@ def err_fn(q,tar):
     P_tar = tar[0:3,3]
     rot_err = SO3.from_matrix(R_ee.T @ R_tar).log()
     pos_err = P_ee-P_tar
-    return jnp.concatenate([rot_err,pos_err])
+    return jnp.concatenate([rot_err, pos_err])
 
 jac_jit = jax.jit(jax.jacfwd(err_fn))
 err_jit = jax.jit(err_fn)
@@ -110,8 +110,8 @@ def inverse_kinematics(
                         jac = lambda q:np.asarray(jac_jit(q,T_target)))
 
     ik_solution = res.x
-    # pos_error = float(jnp.linalg.norm(err_fn(ik_solution,T_target)[3:]))
-    pos_error = float(np.linalg.norm(res.fun))
+    pos_error = float(jnp.linalg.norm(err_fn(ik_solution,T_target)[3:])) + 0.3 * float(jnp.linalg.norm(err_fn(ik_solution,T_target)[:3]))
+    # pos_error = float(np.linalg.norm(res.fun))
 
     #####
 
