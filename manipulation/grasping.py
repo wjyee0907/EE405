@@ -61,6 +61,12 @@ class GraspingNode(GraspingNodeBase):
         self.set_joint_positions(self.home_q, 5.0)
         time.sleep(5.0)
 
+        self.place_q = (
+            np.array(pulse2angle([801,409,138,240,500])),
+            np.array(pulse2angle([866,408,137,240,500])),
+            np.array(pulse2angle([955,408,137,240,500])),
+        )
+        self.block_cnt = 0
 
         #####
 
@@ -165,7 +171,7 @@ class GraspingNode(GraspingNodeBase):
         T_world_marker: np.ndarray,
         grasp_depth: float = 0.025,
         approach_height: float = 0.02,
-        tolerance: float = 0.007
+        tolerance: float = 0.01
     ) -> tuple[np.ndarray, np.ndarray] | None:
         """Return (T_approach, T_grasp), or None if no sampled pair passes IK.
 
@@ -297,54 +303,20 @@ class GraspingNode(GraspingNodeBase):
         """
         Execute placing action given an action name ("blue_3", "green_3", "red_3").
         """
-        # Define Target Pose & Approach Pose (World Z +8 cm)
-        T_place = self.fixed_place_targets[action_name].copy()
+        pre_q = self.place_q[self.block_cnt].copy();pre_q[3] = 0.0
+        self.set_joint_positions(pre_q, self.servo_duration) #move to pre-place position
+        time.sleep(self.servo_duration+self.rest_duration)
 
-        T_pre_place = T_place.copy()
-        T_pre_place[2, 3] += 0.08
+        self.set_joint_positions(self.place_q[self.block_cnt], self.servo_duration) #move to target position
+        time.sleep(self.servo_duration+self.rest_duration)
+        self.gripper_open(self.gripper_duration) #release block
+        time.sleep(self.gripper_duration+self.rest_duration)
 
-        # current_q for IK
-        curr_q = self.get_joint_positions()
+        self.set_joint_positions(self.home_q, self.servo_duration) #return to home position
+        time.sleep(self.servo_duration+self.rest_duration)
+        self.gripper_close(self.gripper_duration) #close gripper
+        time.sleep(self.gripper_duration+self.rest_duration)
 
-        # Approach IK (pos_error < 0.01 m)
-        res_pre = inverse_kinematics(curr_q, T_pre_place)
-        if res_pre is None or res_pre["sol"] is None or res_pre["pos_error"] > 0.01:
-            print(f"[Place Error] IK pre-place failed or pos_error ({res_pre['pos_error'] if res_pre else 'None'}) > 0.01")
-            return False
-        q_pre = res_pre["sol"]
+        self.block_cnt += 1
 
-        # Target IK
-        res_place = inverse_kinematics(q_pre, T_place)   # use q_pre for continuity
-        if res_place is None or res_place["sol"] is None or res_place["pos_error"] > 0.01:
-            print(f"[Place Error] IK place failed or pos_error ({res_place['pos_error'] if res_place else 'None'}) > 0.01")
-            return False
-        q_place = res_place["sol"]
-
-        # 5. Motion Sequence
-        # Step 1: Go 8 cm above drop zone first
-        '''
-        self.set_joint_positions(q_pre, duration=2.0)
-        time.sleep(2.2)
-        '''
-
-        # Step 2: Direct Descend
-        # Modified Step 1~2 : Go directly to drop zone
-        self.set_joint_positions(q_place, duration=1.2)
-        # time.sleep(1.4)
-        time.sleep(3.0)
-
-        # Step 3: Open Gripper
-        self.gripper_open(duration=1.2)
-        time.sleep(1.3)
-
-        # Step 4: Direct Ascend
-        self.set_joint_positions(q_pre, duration=1.2)
-        time.sleep(1.4)
-
-        # Step 5: RTB (Return to Base)
-        if self.home_q is not None:
-            self.set_joint_positions(self.home_q, duration=1.8)
-            time.sleep(1.9)
-
-        print(f"[Place Success] Completed: {action_name}")
         return True
