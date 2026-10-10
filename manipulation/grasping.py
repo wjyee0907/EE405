@@ -56,15 +56,15 @@ class GraspingNode(GraspingNodeBase):
         }
        
         # Safe RTB q (Home Pose) (Need Adjustment)
-        self.home_q = pulse2angle([500, 736, 40, 219, 500])
+        self.home_q = pulse2angle([500, 736, 40, 180, 500])
         
         self.set_joint_positions(self.home_q, 5.0)
         time.sleep(5.0)
 
         self.place_q = (
-            np.array(pulse2angle([801,409,138,240,500])),
-            np.array(pulse2angle([866,408,137,240,500])),
             np.array(pulse2angle([955,408,137,240,500])),
+            np.array(pulse2angle([866,408,137,240,500])),
+            np.array(pulse2angle([801,409,138,240,500])),
         )
         self.block_cnt = 0
 
@@ -109,6 +109,34 @@ class GraspingNode(GraspingNodeBase):
             detected_markers = {}
         return detected_markers
 
+    def rvec_tvec_to_T(self, rvec, tvec):
+        """
+        Convert rotation vector and translation vector to a 4x4 transformation matrix.
+        """
+        R = SO3.exp(rvec).as_matrix()
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = tvec.flatten()
+        return T
+
+    def interpolate_T(self, T_start, T_end, alpha):
+        """
+        Interpolate between two 4x4 transformation matrices.
+        alpha: interpolation factor (0.0 to 1.0)
+        """
+        R_start = T_start[:3, :3]
+        R_end = T_end[:3, :3]
+        t_start = T_start[:3, 3]
+        t_end = T_end[:3, 3]
+
+        R_interp = SO3.interpolate(R_start, R_end, alpha).as_matrix()
+        t_interp = (1 - alpha) * t_start + alpha * t_end
+
+        T_interp = np.eye(4)
+        T_interp[:3, :3] = R_interp
+        T_interp[:3, 3] = t_interp
+        return T_interp
+
     #########################################################################################################################
     ## TODO : Implement the following functions to complete the grasping functionality.
 
@@ -126,69 +154,90 @@ class GraspingNode(GraspingNodeBase):
 
         rvec = detection_result.rvec
         tvec = detection_result.tvec
-        
-        print(rvec)
 
         R_cam_marker = SO3.exp(rvec).as_matrix()
         
         B_aug = jnp.asarray(tvec).reshape(3, 1)
-        print(B_aug)
         C_aug = jnp.array([[0, 0, 0]])
         D_aug = jnp.array([[1]])
         T_cam_marker = jnp.block([[R_cam_marker, B_aug], [C_aug, D_aug]])
-        print(T_cam_marker)
-        
-        print("help")
-        
-        print(self.get_joint_positions())
 
         T_world_cam = forward_kinematics(self.get_joint_positions(), 'cam')
         
-        print(T_world_cam)
-
         T_block = jnp.matmul(T_world_cam, T_cam_marker)
-
         T_block = np.array(T_block)
 
         ######
 
         return T_block
     
-    def solve_waypoint(self, T_target, seed, tolerance) -> np.ndarray | None:
+    def solve_config(
+        self, 
+        T_target: np.ndarray, 
+        seed: np.ndarray, 
+        tolerance: float = 0.03
+    ):
+        """
+            Calculate valid configuration from target T matrix in a given tolerance.
+            Various conditions for rejection : including None output of IK itself, and rotation-position over-tradeoff
+            Returns valid configuration especially for grasping, and total error.
+        """
         result = inverse_kinematics(seed, T_target)
         
-        print(result.get("pos_error"))
-    
-        if result is None or result.get("sol") is None or result.get("pos_error") > tolerance:
+	# If IK itself fails by some reason
+        if result is None or result.get("sol") is None:
             return None
-                
-        q = np.asarray(result["sol"], dtype=float)
-                
-        return q
 
-    def get_grasp_waypoints(
+        pos_err = result.get("pos_error")
+        rot_err = result.get("rot_error")
+        
+        # Ensure that pos_err and rot_err is 'a number'.
+        if pos_err is None or not np.isfinite(pos_err):
+            return None
+        
+        if rot_err is None or not np.isfinite(rot_err):
+            return None
+            
+        print(f"rotational error : {rot_err}, positional error : {pos_err}")
+        
+        # If rotational error exceeds 0.15 rad/s * 1s, pos error exceeds total 1.5cm
+        # To prevent over-tradeoff of pos/rot error.
+        if rot_err > 0.015 or pos_err > 0.015:
+            return None
+        
+        # Further weigh rotational error
+        tot_err = pos_err + 1.3 * rot_err
+        print(tot_err)
+        
+        # Check if total error is within tolerance
+        if tot_err > tolerance:
+            return None
+        
+        q = np.asarray(result["sol"], dtype=float)
+
+        return q, float(tot_err)
+
+    def get_grasp_q(
         self,
         T_world_marker: np.ndarray,
-        grasp_depth: float = 0.025,
+        grasp_depth: float = 0.01,
         approach_height: float = 0.02,
-        tolerance: float = 0.01
-    ) -> tuple[np.ndarray, np.ndarray] | None:
-        """Return (T_approach, T_grasp), or None if no sampled pair passes IK.
-
-        Assume a centered marker on the top face, with +z pointing outward.
-        Sample jaw orientations with the approach at 90 degrees to that face.
-        The TCP grasp point is grasp_depth metres below the marker; the
-        approach point is approach_height metres above it. Both poses have
-        the same orientation, with the approach point behind TCP along -z.
-
-        Checks position, orientation and joint limits at both endpoints.
-        This computes poses only; it does not execute motion or check collisions.
+        tolerance: float = 0.03
+    ):
         """
+            Get a configuration of robotic manipulator from T matrix of marker within given tolerance.
+            Assess multiple grasping poses including:
+              1) Grasping the cube normally.
+              2) Tilted grasping
+            Return the minimum error configuration among the grasping poses satisfying the tolerance constraint.
+        """
+
         T_world_marker = np.asarray(T_world_marker, dtype=float)
 
         q_seed = np.asarray(self.get_joint_positions(), dtype=float)
         
-        print("before for loop")
+        best_score = float("inf")
+        best_q = None
 
         for yaw_deg in (0, 10, 80, 90, 100, 170, 180, 190, 260, 270, 280, 350):
 
@@ -200,7 +249,7 @@ class GraspingNode(GraspingNodeBase):
             
             T_marker_tcp = np.eye(4)
             T_marker_tcp[:3, :3] = R_gripper
-            T_marker_tcp[:3, 3] = [0.0, 0.0, 0.0]
+            T_marker_tcp[:3, 3] = [0.0, 0.0, -0.015]
             
             T_tcp_realtcp = np.eye(4)
             T_tcp_realtcp[:3, 3] = [-0.005, 0.0, +grasp_depth]
@@ -210,25 +259,67 @@ class GraspingNode(GraspingNodeBase):
             # World T grasp calculation
             T_grasp = T_world_marker @ T_marker_tcp
 
-            T_approach = T_grasp.copy()
-            # place the approach pose, +approach height z direction.
-            T_approach[2, 3] += approach_height
-
-            q_approach = self.solve_waypoint(T_approach, q_seed, tolerance)
+            sol_res = self.solve_config(T_grasp, q_seed, tolerance)
             
-            print(q_approach)
-
-            if q_approach is None:
+            if sol_res is None:
                 continue
+                
+            q_grasp = sol_res[0]
+            tot_err = sol_res[1]
 
-            q_grasp = self.solve_waypoint(T_grasp, q_approach, tolerance)
+            if  q_grasp is not None and best_score > tot_err:
+                best_score = tot_err
+                best_q = q_grasp
+                
+        for tilt_deg in (-45, -30, -15, 15, 30, 45):
             
-            print(q_approach, q_grasp)
+            tilt_deg = np.deg2rad(tilt_deg)
+            
+            for yaw_deg in (0, 90, 180, 270):
+                yaw_deg = np.deg2rad(yaw_deg)
+                
+                R_gripper = np.array([[-np.cos(yaw_deg), np.sin(yaw_deg), 0],
+                                [np.sin(yaw_deg), np.cos(yaw_deg), 0],
+                                [0, 0, -1]])
+            
+                T_marker_tcp = np.eye(4)
+                T_marker_tcp[:3, :3] = R_gripper
+                T_marker_tcp[:3, 3] = [0.0, 0.0, -0.015]
+                
+                T_tcp_tilt = np.eye(4)
+                
+                R_tilt = np.array([[np.cos(tilt_deg), 0, -np.sin(tilt_deg)],
+                                [0, 1, 0],
+                                [np.sin(tilt_deg), 0, np.cos(tilt_deg)]])
+                                
+                T_tcp_tilt[:3, :3] = R_tilt
+                
+                T_marker_tcp = np.matmul(T_marker_tcp, T_tcp_tilt)
+            
+                T_tcp_realtcp = np.eye(4)
+                T_tcp_realtcp[:3, 3] = [-0.005, 0.0, +grasp_depth]
+            
+                T_marker_tcp = np.matmul(T_marker_tcp, T_tcp_realtcp)
 
-            if  q_grasp is not None:
-                return q_approach, q_grasp
+                # World T grasp calculation
+                T_grasp = T_world_marker @ T_marker_tcp
+                
+                print(f"tilted grasp degree : {tilt_deg}")
+                
+                sol_res = self.solve_config(T_grasp, q_seed, tolerance)
+                
+                if sol_res is None:
+                    continue
+                
+                q_grasp = sol_res[0]
+                tot_err = sol_res[1]
 
-        return None
+                if  q_grasp is not None and best_score > tot_err:
+                    # return q_approach, q_grasp
+                    best_score = tot_err
+                    best_q = q_grasp
+        
+        return best_q
 
     def grasp(self, target_marker_id: int | str) -> bool:
         """
@@ -239,49 +330,47 @@ class GraspingNode(GraspingNodeBase):
         ######
         ## TODO : Implement this function to perform the complete grasping sequence.
         is_success = False
-        
-
 
         self.gripper_open()
         time.sleep(self.gripper_duration+self.rest_duration)
-
-
+        
+        detected_markers_list = []
         detected_markers = {} 
         target_marker_id = int(target_marker_id)
 
-        for _ in range(50): #retry 50 times if fail to recognize marker
+        for _ in range(50): # Collect every attempt containing the target marker.
             detected_markers = self.get_detected_markers()
             if target_marker_id in detected_markers:
-                break
+                detected_markers_list.append(detected_markers.copy())
 
-
-        if not target_marker_id in detected_markers.keys():
-            print(f"marker {target_marker_id} is not detected.\ndetected markers are {list(detected_markers.keys())}")
+        if not detected_markers_list:
+            print(f"marker {target_marker_id} is not detected.")
             return is_success
             
+        if len(detected_markers_list) <= 3:
+            print(f"marker {target_marker_id} is rarely detected.")
+            return is_success
+            
+        T_block_cand_list = []
+        
+        for dt_mk in detected_markers_list:
+            temp_T_block = self.get_block_pose(dt_mk[target_marker_id])
+            T_block_cand_list.append(temp_T_block)
 
+        # Use the latest valid observation until robust selection is added. (Decided not to include)
+        detected_markers = detected_markers_list[-1]
 
         T_block = self.get_block_pose(detected_markers[target_marker_id])
         
-        print(T_block)
-
-
-        q_res_tuple = self.get_grasp_waypoints(T_block)
-
-        if q_res_tuple is None:
+        q_grasp = self.get_grasp_q(T_block)
+        
+        # If there is no valid grasping configuration, return False.
+        if q_grasp is None:
             return is_success
 
-        q_app = q_res_tuple[0]
-        q_grasp = q_res_tuple[1]
-        
-        print(q_app, q_grasp)
-        
         q_home = self.get_joint_positions()
         
-        print("calculation good")
-
-        self.set_joint_positions(q_app,self.servo_duration) #move to app and...
-        time.sleep(self.servo_duration+self.rest_duration)
+        print(f"targeting {q_grasp}")
 
         self.set_joint_positions(q_grasp,self.servo_duration) #move to block and...
         time.sleep(self.servo_duration+self.rest_duration)

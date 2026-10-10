@@ -119,20 +119,23 @@ def inverse_kinematics(
                             bounds = (lower_limit,upper_limit))
         q_sol = res.x
         err = np.asarray(err_fn(q_sol, T_target))
+        
         pos_err, rot_err = float(np.linalg.norm(err[3:])), float(np.linalg.norm(err[:3]))
         cost = pos_err + rot_err
         if best is None or cost < best[0]:
-            best = (cost, q_sol, pos_err)
-
+            best = (cost, q_sol, pos_err, rot_err)
+        """
         if pos_err < 1e-5 and rot_err < 1e-4:
             break
+        """
 
-    _, ik_solution, pos_error = best
+    _, ik_solution, pos_error, rot_error = best
 
     #####
 
     result = {}
     result["sol"] = ik_solution
     result["pos_error"] = pos_error
+    result["rot_error"] = rot_error
 
     return result
